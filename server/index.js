@@ -7,11 +7,21 @@ import { WebSocketServer, WebSocket } from "ws";
 const app = express();
 const port = Number(process.env.PORT || 8787);
 
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: "1mb" }));
+
+const server = http.createServer(app);
+const clients = new Set();
+let binanceSocket = null;
+
+const symbols = new Set(["btcusdt", "ethusdt", "xrpusdt", "solusdt"]);
 const sessionStore = new Map();
 const authUsers = new Map();
-const clients = new Set();
-
-let binanceSocket = null;
 
 const brokerState = {
   connected: false,
@@ -19,19 +29,6 @@ const brokerState = {
   mode: null,
   config: null,
 };
-
-const allowedIntervals = new Set([
-  "1m",
-  "3m",
-  "5m",
-  "15m",
-  "30m",
-  "1h",
-  "2h",
-  "4h",
-  "6h",
-  "1d",
-]);
 
 function broadcast(message) {
   const data = JSON.stringify(message);
@@ -43,37 +40,41 @@ function broadcast(message) {
   });
 }
 
-function parseAuthToken(req) {
-  const header = String(req.headers.authorization || "");
-  if (!header.startsWith("Bearer ")) {
-    return null;
-  }
-
-  return header.slice("Bearer ".length).trim();
+function buildToken() {
+  return "session_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function safeUserResponse(user) {
-  if (!user || typeof user !== "object") {
+function safeUser(user) {
+  if (!user) {
     return null;
   }
 
   return {
-    email: String(user.email || ""),
-    name: String(user.name || ""),
+    email: String(user.email || "").trim().toLowerCase(),
+    name: String(user.name || "").trim(),
   };
 }
 
 function createSession(user) {
-  const token = "session_" + crypto.randomBytes(18).toString("hex");
+  const token = buildToken();
   const expiresAt = Date.now() + 1000 * 60 * 60 * 12;
   const payload = {
     token,
-    user: safeUserResponse(user),
+    user: safeUser(user),
     expiresAt,
   };
 
   sessionStore.set(token, payload);
   return payload;
+}
+
+function parseAuthToken(req) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) {
+    return null;
+  }
+
+  return header.slice("Bearer ".length).trim();
 }
 
 function currentUser(req) {
@@ -105,14 +106,10 @@ function requireSession(req, res, next) {
   }
 
   req.user = user;
-  req.sessionUser = user;
   return next();
 }
 
 const requireAuth = requireSession;
-
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "1mb" }));
 
 function connectBinance() {
   if (
@@ -123,13 +120,18 @@ function connectBinance() {
     return;
   }
 
-  const symbols = ["btcusdt", "ethusdt", "xrpusdt", "solusdt"];
-  const streams = symbols.map((symbol) => symbol + "@bookTicker").join("/");
-  const socketUrl = "wss://stream.binance.com:9443/stream?streams=" + streams;
+  const streams = Array.from(symbols)
+    .map(function (symbol) {
+      return symbol + "@bookTicker";
+    })
+    .join("/");
 
-  binanceSocket = new WebSocket(socketUrl);
+  const url = "wss://stream.binance.com:9443/stream?streams=" + streams;
+
+  binanceSocket = new WebSocket(url);
 
   binanceSocket.on("open", function () {
+    console.log("Binance live market feed connected");
     broadcast({
       type: "status",
       marketDataConnected: true,
@@ -140,7 +142,8 @@ function connectBinance() {
   binanceSocket.on("message", function (raw) {
     try {
       const packet = JSON.parse(raw.toString());
-      const data = packet && packet.data ? packet.data : null;
+      const data = packet.data;
+
       if (!data || !data.s) {
         return;
       }
@@ -150,9 +153,9 @@ function connectBinance() {
 
       broadcast({
         type: "quote",
-        symbol: String(data.s).toUpperCase(),
-        bid,
-        ask,
+        symbol: data.s.toUpperCase(),
+        bid: bid,
+        ask: ask,
         price: (bid + ask) / 2,
         timestamp: Date.now(),
       });
@@ -168,16 +171,15 @@ function connectBinance() {
       marketDataConnected: false,
       provider: null,
     });
-    setTimeout(connectBinance, 3000);
+
+    setTimeout(function () {
+      connectBinance();
+    }, 3000);
   });
 
   binanceSocket.on("error", function () {
     if (binanceSocket !== null) {
-      try {
-        binanceSocket.close();
-      } catch {
-        // no-op: socket can fail when offline
-      }
+      binanceSocket.close();
     }
   });
 }
@@ -185,27 +187,33 @@ function connectBinance() {
 app.get("/api/health", function (_req, res) {
   res.json({
     ok: true,
-    service: "AI MONSTER U — PREMIUM API",
+    service: "AI MONSTER V71 API Gateway",
+    timestamp: Date.now(),
     brokerConnected: brokerState.connected,
     marketDataConnected:
       binanceSocket !== null &&
       binanceSocket.readyState === WebSocket.OPEN,
-    timestamp: Date.now(),
   });
 });
 
-app.get("/api/auth/session", requireSession, function (req, res) {
-  const session = sessionStore.get(parseAuthToken(req));
+app.get("/api/auth/session", function (req, res) {
+  const token = parseAuthToken(req);
+  if (!token) {
+    return res.json(null);
+  }
 
+  const session = sessionStore.get(token);
   if (!session) {
-    return res.status(401).json({
-      error: "INVALID_SESSION",
-      message: "Session expired or invalid.",
-    });
+    return res.json(null);
+  }
+
+  if (Date.now() > session.expiresAt) {
+    sessionStore.delete(token);
+    return res.json(null);
   }
 
   return res.json({
-    token: session.token,
+    token,
     user: session.user,
     expiresAt: session.expiresAt,
   });
@@ -244,17 +252,11 @@ app.post("/api/auth/register", function (req, res) {
 app.post("/api/auth/login", function (req, res) {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "").trim();
+
   const user = authUsers.get(email);
+  const passwordHash = crypto.createHash("sha256").update(password).digest("hex");
 
-  if (!user) {
-    return res.status(401).json({
-      error: "INVALID_CREDENTIALS",
-      message: "Invalid email or password.",
-    });
-  }
-
-  const hash = crypto.createHash("sha256").update(password).digest("hex");
-  if (user.passwordHash !== hash) {
+  if (!user || user.passwordHash !== passwordHash) {
     return res.status(401).json({
       error: "INVALID_CREDENTIALS",
       message: "Invalid email or password.",
@@ -284,10 +286,23 @@ app.post("/api/auth/reset", function (req, res) {
     });
   }
 
-  return res.json({
-    ok: true,
-    email,
-    message: "If an account exists for this email, reset instructions have been sent.",
+  const userExists = authUsers.has(email);
+  if (!userExists) {
+    return res.status(404).json({
+      error: "USER_NOT_FOUND",
+      message: "No account was found for that email.",
+    });
+  }
+
+  return res.json({ ok: true, email });
+});
+
+app.get("/api/market/status", function (_req, res) {
+  res.json({
+    connected:
+      binanceSocket !== null &&
+      binanceSocket.readyState === WebSocket.OPEN,
+    provider: "Binance",
   });
 });
 
@@ -296,6 +311,19 @@ app.get("/api/market/candles", async function (req, res) {
     const symbol = String(req.query.symbol || "BTCUSDT").toUpperCase();
     const interval = String(req.query.interval || "1m");
     const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 1000);
+    const allowedIntervals = new Set([
+      "1m",
+      "3m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "4h",
+      "6h",
+      "12h",
+      "1d",
+    ]);
 
     if (!allowedIntervals.has(interval)) {
       return res.status(400).json({
@@ -316,24 +344,22 @@ app.get("/api/market/candles", async function (req, res) {
     if (!response.ok) {
       return res.status(502).json({
         error: "MARKET_PROVIDER_ERROR",
-        message: "Unable to fetch historical candle data.",
         status: response.status,
+        message: "Market data provider is unavailable.",
       });
     }
 
     const rows = await response.json();
-    const candles = Array.isArray(rows)
-      ? rows.map(function (row) {
-          return {
-            time: Number(row[0]),
-            open: Number(row[1]),
-            high: Number(row[2]),
-            low: Number(row[3]),
-            close: Number(row[4]),
-            volume: Number(row[5] || 0),
-          };
-        })
-      : [];
+    const candles = rows.map(function (row) {
+      return {
+        time: Number(row[0]),
+        open: Number(row[1]),
+        high: Number(row[2]),
+        low: Number(row[3]),
+        close: Number(row[4]),
+        volume: Number(row[5]),
+      };
+    });
 
     return res.json({
       provider: "Binance",
@@ -349,58 +375,30 @@ app.get("/api/market/candles", async function (req, res) {
   }
 });
 
-app.get("/api/market/status", function (_req, res) {
-  res.json({
-    connected:
-      binanceSocket !== null &&
-      binanceSocket.readyState === WebSocket.OPEN,
-    provider: "Binance",
-    status: "online",
+app.get("/api/market/quote/:symbol", function (req, res) {
+  const symbol = String(req.params.symbol || "BTCUSDT").toUpperCase();
+  const now = Date.now();
+
+  return res.json({
+    symbol,
+    bid: 0,
+    ask: 0,
+    price: 0,
+    timestamp: now,
+    message: "Quote stream unavailable until market provider is connected.",
   });
 });
 
-app.get("/api/market/quote/:symbol", async function (req, res) {
-  try {
-    const symbol = String(req.params.symbol || "BTCUSDT").toUpperCase();
-    const url = "https://api.binance.com/api/v3/ticker/bookTicker?symbol=" + encodeURIComponent(symbol);
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      return res.status(502).json({
-        error: "QUOTE_PROVIDER_ERROR",
-        message: "Market quote unavailable.",
-      });
-    }
-
-    const data = await response.json();
-    const bid = Number(data?.bidPrice ?? 0);
-    const ask = Number(data?.askPrice ?? 0);
-    return res.json({
-      symbol,
-      bid,
-      ask,
-      price: bid && ask ? (bid + ask) / 2 : 0,
-      timestamp: Date.now(),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      error: "QUOTE_REQUEST_FAILED",
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
-});
-
-app.get("/api/broker/status", requireAuth, function (_req, res) {
+app.get("/api/broker/status", requireSession, function (_req, res) {
   return res.json({
     connected: brokerState.connected,
     broker: brokerState.broker,
     mode: brokerState.mode,
     provider: brokerState.broker,
-    status: brokerState.connected ? "connected" : "disconnected",
   });
 });
 
-app.post("/api/broker/test", requireAuth, function (req, res) {
+app.post("/api/broker/test", requireSession, function (req, res) {
   const payload = req.body || {};
   const broker = String(payload.broker || "").trim();
   const mode = ["demo", "test", "live"].includes(String(payload.mode || ""))
@@ -417,7 +415,6 @@ app.post("/api/broker/test", requireAuth, function (req, res) {
   const config = {
     broker,
     mode,
-    apiKey: payload.apiKey ? String(payload.apiKey).slice(0, 6) + "..." : null,
     endpoint: payload.endpoint || null,
     accountName: payload.accountName || null,
   };
@@ -427,14 +424,10 @@ app.post("/api/broker/test", requireAuth, function (req, res) {
   brokerState.mode = mode;
   brokerState.config = config;
 
-  return res.json({
-    ok: true,
-    status: "CONNECTED",
-    config,
-  });
+  return res.json({ ok: true, status: "CONNECTED", config });
 });
 
-app.post("/api/broker/disconnect", requireAuth, function (_req, res) {
+app.post("/api/broker/disconnect", requireSession, function (_req, res) {
   brokerState.connected = false;
   brokerState.broker = null;
   brokerState.mode = null;
@@ -443,7 +436,7 @@ app.post("/api/broker/disconnect", requireAuth, function (_req, res) {
   return res.json({ ok: true });
 });
 
-app.get("/api/account", requireAuth, function (_req, res) {
+app.get("/api/account", requireSession, function (_req, res) {
   if (!brokerState.connected) {
     return res.status(503).json({
       error: "BROKER_NOT_CONNECTED",
@@ -461,39 +454,7 @@ app.get("/api/account", requireAuth, function (_req, res) {
   });
 });
 
-app.get("/api/positions", requireAuth, function (_req, res) {
-  return res.json({
-    positions: [],
-    connected: brokerState.connected,
-  });
-});
-
-app.get("/api/orders/history", requireAuth, function (_req, res) {
-  return res.json({
-    orders: [],
-    connected: brokerState.connected,
-  });
-});
-
-app.get("/api/trades/history", requireAuth, function (_req, res) {
-  return res.json({
-    trades: [],
-    connected: brokerState.connected,
-  });
-});
-
-app.get("/api/risk/config", requireAuth, function (_req, res) {
-  return res.json({
-    riskPercent: 1,
-    presets: {
-      normal: 1,
-      high: 3.5,
-      aggressive: 5,
-    },
-  });
-});
-
-app.post("/api/orders", requireAuth, function (req, res) {
+app.post("/api/orders", requireSession, function (req, res) {
   if (!brokerState.connected) {
     return res.status(503).json({
       error: "BROKER_NOT_CONNECTED",
@@ -513,14 +474,29 @@ app.post("/api/orders", requireAuth, function (req, res) {
     ok: true,
     orderId: "ord_" + Date.now().toString(36),
     status: "PENDING",
-    symbol: String(symbol).toUpperCase(),
-    side: String(side).toUpperCase(),
-    volume: Number(volume),
-    price: Number(price),
+    symbol,
+    side,
+    volume,
+    price,
   });
 });
 
-const server = http.createServer(app);
+app.get("/api/positions", requireSession, function (_req, res) {
+  return res.json({ positions: [] });
+});
+
+app.get("/api/orders/history", requireSession, function (_req, res) {
+  return res.json({ orders: [] });
+});
+
+app.get("/api/trades/history", requireSession, function (_req, res) {
+  return res.json({ trades: [] });
+});
+
+app.get("/api/risk", requireSession, function (_req, res) {
+  return res.json({ risk: 1, presets: { normal: 1, high: 3.5, aggressive: 5 } });
+});
+
 const marketServer = new WebSocketServer({
   server,
   path: "/market",
@@ -528,7 +504,6 @@ const marketServer = new WebSocketServer({
 
 marketServer.on("connection", function (socket) {
   clients.add(socket);
-
   socket.send(
     JSON.stringify({
       type: "status",
@@ -536,7 +511,7 @@ marketServer.on("connection", function (socket) {
         binanceSocket !== null &&
         binanceSocket.readyState === WebSocket.OPEN,
       provider: "Binance",
-    }),
+    })
   );
 
   socket.on("close", function () {
@@ -545,6 +520,6 @@ marketServer.on("connection", function (socket) {
 });
 
 server.listen(port, function () {
-  console.log("AI MONSTER U — PREMIUM API listening on " + port);
+  console.log("AI MONSTER V71 API Gateway listening on " + port);
   connectBinance();
 });
