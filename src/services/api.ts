@@ -67,6 +67,23 @@ export type BrokerStatusResponse = {
   broker: string | null;
   mode: "demo" | "test" | "live" | null;
   provider?: string | null;
+  environment?: string | null;
+  account?: Record<string, unknown> | null;
+  currency?: string | null;
+  balance?: number;
+  equity?: number;
+  message?: string;
+};
+
+export type NormalizedBrokerStatus = {
+  provider: string | null;
+  connected: boolean;
+  environment: string | null;
+  account: Record<string, unknown> | null;
+  currency: string | null;
+  balance: number;
+  equity: number;
+  message: string;
 };
 
 export type AccountData = {
@@ -90,12 +107,23 @@ export type SessionResponse = {
 };
 
 export type BrokerConfigInput = {
-  broker: string;
-  mode: "demo" | "test" | "live";
+  provider?: string;
+  broker?: string;
+  mode?: "demo" | "test" | "live";
+  environment?: string;
   apiKey?: string;
+  apiSecret?: string;
   secret?: string;
   endpoint?: string;
   accountName?: string;
+  gatewayUrl?: string;
+  username?: string;
+  password?: string;
+  baseUrl?: string;
+  authType?: string;
+  token?: string;
+  login?: string;
+  [key: string]: unknown;
 };
 
 export function getGatewayHealth() {
@@ -103,7 +131,11 @@ export function getGatewayHealth() {
 }
 
 export function getBrokerStatus() {
-  return request<BrokerStatusResponse>("/broker/status");
+  return request<NormalizedBrokerStatus>("/broker/status");
+}
+
+export function getBrokerAccount() {
+  return request<NormalizedBrokerStatus>("/broker/account");
 }
 
 export function getAccount() {
@@ -143,10 +175,18 @@ export function resetPassword(email: string) {
   });
 }
 
+export function connectBroker(payload: BrokerConfigInput) {
+  return request<NormalizedBrokerStatus>("/broker/connect", "POST", payload);
+}
+
 export function testBrokerConnection(payload: BrokerConfigInput) {
-  return request<{ ok: true; status: string }>("/broker/test", "POST", payload);
+  return request<NormalizedBrokerStatus>("/broker/test", "POST", payload);
 }
 
 export function disconnectBroker() {
-  return request<{ ok: true }>("/broker/disconnect", "POST", {});
+  return request<{ ok: true; status: NormalizedBrokerStatus }>(
+    "/broker/disconnect",
+    "POST",
+    {},
+  );
 }
