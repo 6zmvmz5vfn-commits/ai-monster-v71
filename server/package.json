@@ -1,0 +1,13 @@
+{
+  "name": "ai-monster-v71-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "ws": "^8.21.3"
+  }
+}
