@@ -1,5 +1,7 @@
-const API_BASE =
-  import.meta.env.VITE_API_BASE_URL || "/api";
+const rawApiBase = (import.meta.env.VITE_API_BASE_URL || "/api").trim();
+const API_BASE = rawApiBase.endsWith("/api")
+  ? rawApiBase
+  : `${rawApiBase.replace(/\/$/, "")}/api`;
 
 function getStoredSessionToken() {
   if (typeof window === "undefined") {
@@ -16,10 +18,30 @@ function getStoredSessionToken() {
   }
 }
 
+function getSafeApiErrorMessage(data: unknown, fallback: string): string {
+  if (typeof data === "object" && data !== null) {
+    const record = data as Record<string, unknown>;
+    const message =
+      typeof record.message === "string"
+        ? record.message
+        : typeof record.error === "string"
+          ? record.error
+          : typeof record.detail === "string"
+            ? record.detail
+            : "";
+
+    if (message) {
+      return message;
+    }
+  }
+
+  return fallback;
+}
+
 async function request<T>(
   path: string,
   method: "GET" | "POST" = "GET",
-  body?: unknown
+  body?: unknown,
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -34,26 +56,52 @@ async function request<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(API_BASE + path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  try {
+    const response = await fetch(API_BASE + path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
 
-  const data = await response.json().catch(() => ({}));
+    let data: unknown = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
 
-  if (!response.ok) {
-    const message =
-      typeof data === "object" && data && "message" in data
-        ? String((data as { message?: string }).message)
-        : typeof data === "object" && data && "error" in data
-          ? String((data as { error?: string }).error)
-          : "API request failed";
+    if (!response.ok) {
+      const errorMessage = getSafeApiErrorMessage(data, "API request failed");
+      throw new Error(errorMessage);
+    }
 
-    throw new Error(message);
+    return data as T;
+  } catch (error) {
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      if (message.includes("failed to fetch") || message.includes("networkerror")) {
+        throw new Error("Network error. Please check your connection and try again.");
+      }
+      if (message.includes("cors") || message.includes("not allowed by cors")) {
+        throw new Error("CORS/network configuration error. Please try again or contact support.");
+      }
+      if (message === "authentication required" || message.includes("auth_required")) {
+        throw new Error("Authentication required.");
+      }
+      if (message.includes("invalid credentials") || message.includes("user not found")) {
+        throw new Error("Invalid credentials.");
+      }
+      if (message.includes("session") || message.includes("expired") || message.includes("token")) {
+        throw new Error("Session expired. Please sign in again.");
+      }
+      if (message.includes("server unavailable") || message.includes("internal server error")) {
+        throw new Error("Server unavailable. Please try again later.");
+      }
+      throw new Error(error.message || "Request failed.");
+    }
+
+    throw new Error("Server unavailable. Please try again later.");
   }
-
-  return data as T;
 }
 
 export type GatewayHealth = {
