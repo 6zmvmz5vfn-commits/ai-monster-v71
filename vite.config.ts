@@ -5,6 +5,10 @@ const gatewayUrl = "http://localhost:8787";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+  },
   server: {
     host: "0.0.0.0",
     port: 5173,
@@ -21,8 +25,8 @@ export default defineConfig({
     },
   },
   preview: {
-  host: "0.0.0.0",
-  port: Number(process.env.PORT) || 4173,
-  allowedHosts: true,
-},
+    host: "0.0.0.0",
+    port: Number(process.env.PORT) || 4173,
+    allowedHosts: true,
+  },
 });

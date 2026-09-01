@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import http from "http";
+import path from "node:path";
 import crypto from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -43,7 +44,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-Requested-With"],
   }),
 );
-app.options("*", cors({
+app.options(/.*/, cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.has(origin)) {
       callback(null, true);
@@ -1043,8 +1044,24 @@ marketServer.on("connection", function (socket) {
   });
 });
 
+const distDir = path.join(process.cwd(), "dist");
+app.use(express.static(distDir, { index: false }));
+app.use(function (req, res, next) {
+  if (req.method !== "GET") {
+    return next();
+  }
+
+  const pathname = String(req.path || "/");
+  if (pathname.startsWith("/api") || pathname.startsWith("/market")) {
+    return next();
+  }
+
+  return res.sendFile(path.join(distDir, "index.html"));
+});
+
 server.listen(port, "0.0.0.0", function () {
   console.log(`AI MONSTER U backend listening on port ${port}`);
+  console.log(`Serving frontend from ${distDir}`);
 });
 
 export default app;
