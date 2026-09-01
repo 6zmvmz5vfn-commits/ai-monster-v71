@@ -3,6 +3,7 @@ import cors from "cors";
 import http from "http";
 import path from "node:path";
 import crypto from "crypto";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 
 const app = express();
@@ -1044,10 +1045,10 @@ marketServer.on("connection", function (socket) {
   });
 });
 
-const distDir = path.join(process.cwd(), "dist");
+const distDir = fileURLToPath(new URL("../dist", import.meta.url));
 app.use(express.static(distDir, { index: false }));
 app.use(function (req, res, next) {
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "HEAD") {
     return next();
   }
 
